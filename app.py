@@ -19,8 +19,12 @@ UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 CROPPED_FOLDER = os.path.join(BASE_DIR, "cropped")
 PROCESSED_FOLDER = os.path.join(BASE_DIR, "processed")
 
-# Mount static files for processed images
-app.mount("/processed_images", StaticFiles(directory=PROCESSED_FOLDER), name="processed_images")
+# Mount static files with cache control
+app.mount(
+    "/processed_images",
+    StaticFiles(directory=PROCESSED_FOLDER, html=True),
+    name="processed_images",
+)
 
 # Ensure directories exist
 for folder in [UPLOAD_FOLDER, CROPPED_FOLDER, PROCESSED_FOLDER]:
@@ -30,6 +34,7 @@ for folder in [UPLOAD_FOLDER, CROPPED_FOLDER, PROCESSED_FOLDER]:
 yolo_model = None
 reader = None
 
+
 def get_yolo_model():
     """Lazy load the YOLO model."""
     global yolo_model
@@ -37,144 +42,134 @@ def get_yolo_model():
         yolo_model = YOLO("model/best_ele_robo.pt")
     return yolo_model
 
+
 def get_easyocr_reader():
     """Lazy load the EasyOCR reader."""
     global reader
     if reader is None:
-        reader = easyocr.Reader(['en'], gpu=False)
+        reader = easyocr.Reader(["en"], gpu=False)
     return reader
 
+
 def enhance_display_image(image_path):
-    """
-    Enhances the display of an image for better OCR results.
-    """
+    """Enhance the display of an image for better OCR results."""
     img = cv2.imread(image_path)
 
-    # Convert to grayscale
+    # Convert to grayscale if not already
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
 
-    # Resize for better visibility
+    # Resize, denoise, and enhance contrast
     scaled = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-
-    # Denoise the image
     denoised = cv2.bilateralFilter(scaled, 9, 75, 75)
-
-    # Enhance contrast
     contrast = cv2.convertScaleAbs(denoised, alpha=1.3, beta=10)
 
-    # Apply thresholding
+    # Threshold and sharpen
     _, thresh = cv2.threshold(contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Sharpen the image
     kernel = np.array([[-0.5, -0.5, -0.5], [-0.5, 5, -0.5], [-0.5, -0.5, -0.5]])
     sharpened = cv2.filter2D(thresh, -1, kernel)
 
-    # Apply morphological closing to enhance structure
+    # Morphological operations
     kernel = np.ones((2, 2), np.uint8)
     final = cv2.morphologyEx(sharpened, cv2.MORPH_CLOSE, kernel, iterations=1)
 
     return final
 
+
 def process_image(image_path):
-    """
-    Processes an image using YOLO, applies CV operations, and performs OCR.
-    Returns bounding box results, enhanced image path, and recognized text.
-    """
-    # Get models
-    model = get_yolo_model()
-    reader = get_easyocr_reader()
+    """Processes an image using YOLO and OCR. Returns bounding boxes, enhanced image path, and recognized text."""
+    try:
+        # Get models
+        model = get_yolo_model()
+        reader = get_easyocr_reader()
 
-    # Perform YOLO inference
-    results = model(image_path)
-    detections = results[0].boxes.data.cpu().numpy() if results[0].boxes.data.numel() > 0 else []
+        # Perform YOLO inference
+        results = model(image_path)
+        detections = results[0].boxes.data.cpu().numpy() if results[0].boxes.data.numel() > 0 else []
 
-    bounding_boxes = []
-    recognized_text = []
-    enhanced_image_path = None
+        bounding_boxes = []
+        recognized_text = []
+        enhanced_image_path = None
 
-    for detection in detections:
-        # YOLO detection format: [x1, y1, x2, y2, confidence, class_id]
-        x1, y1, x2, y2, confidence, class_id = detection
+        for detection in detections:
+            x1, y1, x2, y2, confidence, class_id = detection
 
-        # Open the image
-        image = Image.open(image_path)
+            # Open and crop image
+            image = Image.open(image_path)
+            bbox = [int(x1), int(y1), int(x2), int(y2)]
+            cropped_image = image.crop(bbox)
 
-        # Crop the detected region
-        bbox = [int(x1), int(y1), int(x2), int(y2)]
-        cropped_image = image.crop(bbox)
+            # Save cropped image
+            cropped_image_path = os.path.join(CROPPED_FOLDER, f"{uuid.uuid4().hex}_cropped.png")
+            cropped_image.save(cropped_image_path)
 
-        # Save cropped image
-        cropped_image_path = os.path.join(CROPPED_FOLDER, f"{uuid.uuid4().hex}_cropped.png")
-        cropped_image.save(cropped_image_path)
+            # Enhance cropped image
+            enhanced_image = enhance_display_image(cropped_image_path)
 
-        # Enhance the cropped image
-        enhanced_image = enhance_display_image(cropped_image_path)
+            # Save processed image
+            enhanced_image_path = os.path.join(PROCESSED_FOLDER, f"{uuid.uuid4().hex}_processed.png")
+            cv2.imwrite(enhanced_image_path, enhanced_image)
 
-        # Save the processed image
-        enhanced_image_path = os.path.join(PROCESSED_FOLDER, f"{uuid.uuid4().hex}_processed.png")
-        cv2.imwrite(enhanced_image_path, enhanced_image)
+            # Perform OCR
+            result = reader.readtext(enhanced_image, allowlist="0123456789")
+            recognized_text.extend([entry[1] for entry in result])
 
-        # Perform OCR on enhanced image
-        result = reader.readtext(enhanced_image, allowlist='0123456789')
+            # Record bounding box details
+            bounding_boxes.append({
+                "x1": int(x1),
+                "y1": int(y1),
+                "x2": int(x2),
+                "y2": int(y2),
+                "confidence": float(confidence),
+                "class_id": int(class_id),
+            })
 
-        # Extract text from OCR results
-        for entry in result:
-            bbox, text, prob = entry
-            recognized_text.append(text)
+        return bounding_boxes, enhanced_image_path, " ".join(recognized_text)
 
-        # Append bounding box details
-        bounding_boxes.append({
-            "x1": int(x1),
-            "y1": int(y1),
-            "x2": int(x2),
-            "y2": int(y2),
-            "confidence": float(confidence),
-            "class_id": int(class_id)
-        })
+    finally:
+        # Clean up temporary files
+        if os.path.exists(image_path):
+            os.remove(image_path)
 
-    return bounding_boxes, enhanced_image_path, " ".join(recognized_text)
 
 @app.post("/ocr/")
 async def recognize_text(file: UploadFile = File(...)):
-    """
-    Endpoint to process an image and return recognized text.
-    """
+    """Endpoint to recognize text in an image."""
     if file.content_type not in ["image/jpeg", "image/png"]:
         raise HTTPException(status_code=400, detail="Invalid file type. Upload JPEG or PNG images only.")
 
-    # Save the uploaded file
+    # Save uploaded file
     file_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}_{file.filename}")
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Process the image
+    # Process image
     _, _, recognized_text = process_image(file_path)
-
     return JSONResponse({"recognized_text": recognized_text})
+
 
 @app.post("/process/")
 async def process_image_endpoint(file: UploadFile = File(...)):
-    """
-    Endpoint to process an image, return bounding boxes, processed image, and recognized text.
-    """
-    if file.content_type not in ["image/jpeg", "image/png", "image/jpg"]:
-        raise HTTPException(status_code=400, detail="Invalid file type. Upload JPEG/PNG/JPG images only.")
+    """Endpoint to process an image, returning bounding boxes, processed image, and recognized text."""
+    if file.content_type not in ["image/jpeg", "image/png"]:
+        raise HTTPException(status_code=400, detail="Invalid file type. Upload JPEG or PNG images only.")
 
-    # Save the uploaded file
+    # Save uploaded file
     file_path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}_{file.filename}")
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Process the image
+    # Process image
     bounding_boxes, enhanced_image_path, recognized_text = process_image(file_path)
+    processed_image_url = f"/processed_images/{os.path.basename(enhanced_image_path)}"
 
     return JSONResponse({
         "bounding_boxes": bounding_boxes,
-        "processed_image_url": f"/processed_images/{os.path.basename(enhanced_image_path)}",
-        "recognized_text": recognized_text
+        "processed_image_url": processed_image_url,
+        "recognized_text": recognized_text,
     })
+
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host='0.0.0.0', port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
