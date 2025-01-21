@@ -1,22 +1,23 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 import shutil
 import os
+import uuid
 from ultralytics import YOLO
 from PIL import Image
 import cv2
 import numpy as np
 import easyocr
-import uuid
 
 # Create FastAPI app
 app = FastAPI()
 
-# Define folders
-UPLOAD_FOLDER = "uploads"
-CROPPED_FOLDER = "cropped"
-PROCESSED_FOLDER = "processed"
+# Define folders with environment support
+BASE_DIR = os.getenv("BASE_DIR", ".")
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+CROPPED_FOLDER = os.path.join(BASE_DIR, "cropped")
+PROCESSED_FOLDER = os.path.join(BASE_DIR, "processed")
 
 # Mount static files for processed images
 app.mount("/processed_images", StaticFiles(directory=PROCESSED_FOLDER), name="processed_images")
@@ -25,11 +26,23 @@ app.mount("/processed_images", StaticFiles(directory=PROCESSED_FOLDER), name="pr
 for folder in [UPLOAD_FOLDER, CROPPED_FOLDER, PROCESSED_FOLDER]:
     os.makedirs(folder, exist_ok=True)
 
-# Load YOLO model and EasyOCR reader
-MODEL_PATH = "model/best_ele_robo.pt"
-yolo_model = YOLO(MODEL_PATH)
-reader = easyocr.Reader(['en'], gpu=False)
+# Global variables for YOLO and EasyOCR
+yolo_model = None
+reader = None
 
+def get_yolo_model():
+    """Lazy load the YOLO model."""
+    global yolo_model
+    if yolo_model is None:
+        yolo_model = YOLO("model/best_ele_robo.pt")
+    return yolo_model
+
+def get_easyocr_reader():
+    """Lazy load the EasyOCR reader."""
+    global reader
+    if reader is None:
+        reader = easyocr.Reader(['en'], gpu=False)
+    return reader
 
 def enhance_display_image(image_path):
     """
@@ -62,14 +75,17 @@ def enhance_display_image(image_path):
 
     return final
 
-
 def process_image(image_path):
     """
     Processes an image using YOLO, applies CV operations, and performs OCR.
     Returns bounding box results, enhanced image path, and recognized text.
     """
+    # Get models
+    model = get_yolo_model()
+    reader = get_easyocr_reader()
+
     # Perform YOLO inference
-    results = yolo_model(image_path)
+    results = model(image_path)
     detections = results[0].boxes.data.cpu().numpy() if results[0].boxes.data.numel() > 0 else []
 
     bounding_boxes = []
@@ -118,7 +134,6 @@ def process_image(image_path):
 
     return bounding_boxes, enhanced_image_path, " ".join(recognized_text)
 
-
 @app.post("/ocr/")
 async def recognize_text(file: UploadFile = File(...)):
     """
@@ -136,7 +151,6 @@ async def recognize_text(file: UploadFile = File(...)):
     _, _, recognized_text = process_image(file_path)
 
     return JSONResponse({"recognized_text": recognized_text})
-
 
 @app.post("/process/")
 async def process_image_endpoint(file: UploadFile = File(...)):
@@ -160,7 +174,7 @@ async def process_image_endpoint(file: UploadFile = File(...)):
         "recognized_text": recognized_text
     })
 
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host='0.0.0.0', port=port)
