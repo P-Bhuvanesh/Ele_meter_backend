@@ -1,0 +1,1 @@
+# Backend service for Electricity meter reading using image recognization
