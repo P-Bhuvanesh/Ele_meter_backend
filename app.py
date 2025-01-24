@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import os
 import uuid
@@ -12,6 +13,14 @@ import easyocr
 
 # Create FastAPI app
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Replace "*" with a specific origin like "http://localhost:5500" for better security
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all HTTP headers
+)
 
 # Define folders with environment support
 BASE_DIR = os.getenv("BASE_DIR", ".")
@@ -76,7 +85,7 @@ def enhance_display_image(image_path):
 
 
 def process_image(image_path):
-    """Processes an image using YOLO and OCR. Returns bounding boxes, enhanced image path, and recognized text."""
+    """Processes an image using YOLO and OCR. Returns bounding boxes, YOLO-processed image path, enhanced image path, and recognized text."""
     try:
         # Get models
         model = get_yolo_model()
@@ -90,8 +99,16 @@ def process_image(image_path):
         recognized_text = []
         enhanced_image_path = None
 
+        # Load original image for bounding box overlay
+        original_image = cv2.imread(image_path)
+
         for detection in detections:
             x1, y1, x2, y2, confidence, class_id = detection
+
+            # Draw bounding boxes and labels on the original image
+            label = f"Class {int(class_id)}: {confidence:.2f}"
+            cv2.rectangle(original_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+            cv2.putText(original_image, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
             # Open and crop image
             image = Image.open(image_path)
@@ -105,7 +122,7 @@ def process_image(image_path):
             # Enhance cropped image
             enhanced_image = enhance_display_image(cropped_image_path)
 
-            # Save processed image
+            # Save enhanced image
             enhanced_image_path = os.path.join(PROCESSED_FOLDER, f"{uuid.uuid4().hex}_processed.png")
             cv2.imwrite(enhanced_image_path, enhanced_image)
 
@@ -123,12 +140,17 @@ def process_image(image_path):
                 "class_id": int(class_id),
             })
 
-        return bounding_boxes, enhanced_image_path, " ".join(recognized_text)
+        # Save YOLO-processed image
+        yolo_processed_image_path = os.path.join(PROCESSED_FOLDER, f"{uuid.uuid4().hex}_yolo_processed.png")
+        cv2.imwrite(yolo_processed_image_path, original_image)
+
+        return bounding_boxes, yolo_processed_image_path, enhanced_image_path, " ".join(recognized_text)
 
     finally:
         # Clean up temporary files
         if os.path.exists(image_path):
             os.remove(image_path)
+
 
 
 @app.post("/ocr/")
@@ -143,13 +165,13 @@ async def recognize_text(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
 
     # Process image
-    _, _, recognized_text = process_image(file_path)
+    _, _, _, recognized_text = process_image(file_path)
     return JSONResponse({"recognized_text": recognized_text})
 
 
 @app.post("/process/")
 async def process_image_endpoint(file: UploadFile = File(...)):
-    """Endpoint to process an image, returning bounding boxes, processed image, and recognized text."""
+    """Endpoint to process an image, returning bounding boxes, YOLO-processed image, enhanced image, and recognized text."""
     if file.content_type not in ["image/jpeg", "image/png"]:
         raise HTTPException(status_code=400, detail="Invalid file type. Upload JPEG or PNG images only.")
 
@@ -159,12 +181,12 @@ async def process_image_endpoint(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
 
     # Process image
-    bounding_boxes, enhanced_image_path, recognized_text = process_image(file_path)
-    processed_image_url = f"/processed_images/{os.path.basename(enhanced_image_path)}"
+    bounding_boxes, yolo_processed_image_path, enhanced_image_path, recognized_text = process_image(file_path)
 
     return JSONResponse({
         "bounding_boxes": bounding_boxes,
-        "processed_image_url": processed_image_url,
+        "yolo_processed_image_url": f"/processed_images/{os.path.basename(yolo_processed_image_path)}",
+        "enhanced_image_url": f"/processed_images/{os.path.basename(enhanced_image_path)}",
         "recognized_text": recognized_text,
     })
 
@@ -172,4 +194,5 @@ async def process_image_endpoint(file: UploadFile = File(...)):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # uvicorn.run("app:app", host="127.0.0.1", port=port, reload=True)
+    uvicorn.run(app, host="127.0.0.1", port=port)
