@@ -1,2 +1,5 @@
 /venv 
 /model/best_ele_meter.pt
+try.py
+server.py
+/uploads
