@@ -64,10 +64,10 @@ def process_image(image):
     enhanced_image = None
 
     original_image = image.copy()
-
+    classes = ["Meter Reading"]
     for detection in detections:
         x1, y1, x2, y2, confidence, class_id = detection
-        label = f"Class {int(class_id)}: {confidence:.2f}"
+        label = f"Class: {classes[int(class_id)]}: {confidence:.2f}"
         cv2.rectangle(original_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
         cv2.putText(original_image, label, (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
@@ -171,4 +171,4 @@ async def get_enhanced_image():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
